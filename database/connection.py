@@ -1,54 +1,40 @@
-from typing import Optional, Any, List, Dict, Tuple
-from datetime import datetime, timedelta
-import logging
 import time
 import pyodbc
+import logging
+from typing import Optional
 from contextlib import contextmanager
 
 from core.config import AppConfig
 from core.exceptions import DatabaseError
 
-class Cache:
-    """Simple cache implementation with timeout."""
-    
-    def __init__(self, timeout_seconds: int = 300):
-        self._cache: Dict[str, Tuple[Any, datetime]] = {}
-        self._timeout = timeout_seconds
-        
-    def get(self, key: str) -> Optional[Any]:
-        """Get cached value if not expired."""
-        if key not in self._cache:
-            return None
-        
-        value, timestamp = self._cache[key]
-        if datetime.now() - timestamp > timedelta(seconds=self._timeout):
-            del self._cache[key]
-            return None
-            
-        return value
-        
-    def set(self, key: str, value: Any) -> None:
-        """Store value in cache with current timestamp."""
-        self._cache[key] = (value, datetime.now())
-        
-    def delete(self, key: str) -> None:
-        """Remove entry from cache."""
-        self._cache.pop(key, None)
-        
-    def clear(self) -> None:
-        """Clear all cache entries."""
-        self._cache.clear()
-
 class DatabaseConnection:
-    """SQL Server connection manager."""
+    """Manejador de conexión a SQL Server con soporte para transacciones."""
     
     def __init__(self, config: AppConfig):
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.connection: Optional[pyodbc.Connection] = None
+        self._create_connection_string()
+
+    def _create_connection_string(self) -> None:
+        """Configura la cadena de conexión con los parámetros de configuración."""
+        self.connection_string = (
+            f"Driver={{{self.config.db_config['driver']}}};"
+            f"Server={self.config.db_config['server']};"
+            f"Database={self.config.db_config['database']};"
+            f"UID={self.config.db_config['user']};"
+            f"PWD={self.config.db_config['password']};"
+            f"TrustServerCertificate={self.config.db_config['trust_certificate']};"
+            f"MultipleActiveResultSets={self.config.db_config['multiple_active_resultsets']};"
+            f"Min Pool Size={self.config.db_config['pool_min_size']};"
+            f"Max Pool Size={self.config.db_config['pool_max_size']};"
+            f"Connection Timeout={self.config.db_config['connection_timeout']};"
+            f"Query Timeout={self.config.db_config['query_timeout']};"
+            f"Connection Reset={self.config.db_config['connection_reset']}"
+        )
         
     def initialize(self) -> None:
-        """Initialize connection with retry policy."""
+        """Inicializa la conexión con política de reintentos."""
         max_retries = 3
         retry_delay = 2
         
@@ -57,60 +43,80 @@ class DatabaseConnection:
                 if self.connection and not self.connection.closed:
                     self.close()
                     
-                self.connection = pyodbc.connect(
-                    self.config.get_connection_string(), 
-                    autocommit=True
-                )
-                self.logger.info("Database connection initialized")
+                self.connection = pyodbc.connect(self.connection_string, autocommit=True)
+                self.logger.info("Conexión a base de datos inicializada")
                 return
                 
             except Exception as e:
                 if attempt < max_retries - 1:
-                    self.logger.warning(f"Attempt {attempt + 1} failed: {e}")
+                    self.logger.warning(f"Intento {attempt + 1} fallido: {e}")
                     time.sleep(retry_delay)
                 else:
-                    raise DatabaseError("Failed to initialize database connection") from e
+                    raise DatabaseError("Error al inicializar conexión de base de datos") from e
 
     @contextmanager
     def get_cursor(self):
-        """Provide cursor with automatic reconnection and cleanup."""
-        if not self.connection or self.connection.closed:
-            self.initialize()
-            
-        cursor = self.connection.cursor()
+        """Provee un cursor con reconexión automática."""
         try:
-            yield cursor
-        except pyodbc.Error as e:
-            if any(err in str(e) for err in [
-                'Connection is closed',
-                'Connection reset',
-                'Connection timeout',
-                'Connection lost',
-                'Communication link failure'
-            ]):
+            if not self.connection or self.connection.closed:
                 self.initialize()
-                raise DatabaseError("Connection error - please retry") from e
-            raise DatabaseError(f"Database error: {str(e)}") from e
-        finally:
-            cursor.close()
-            
+                
+            cursor = self.connection.cursor()
+            try:
+                yield cursor
+            finally:
+                cursor.close()
+        except pyodbc.Error as e:
+            if self._is_connection_error(e):
+                self.initialize()
+                raise DatabaseError("Error de conexión - intente nuevamente") from e
+            raise DatabaseError(f"Error de base de datos: {str(e)}") from e
+
     @contextmanager
     def transaction(self):
-        """Provide transaction context with automatic commit/rollback."""
+        """Provee un contexto transaccional con commit/rollback automático."""
         with self.get_cursor() as cursor:
             try:
                 cursor.execute("BEGIN TRANSACTION")
                 yield cursor
                 cursor.execute("COMMIT")
-            except Exception:
+            except Exception as e:
                 cursor.execute("ROLLBACK")
+                self.logger.error(f"Error en transacción: {e}")
+                raise DatabaseError("Error en transacción") from e
+        
+    def _is_connection_error(self, error: pyodbc.Error) -> bool:
+        """Identifica errores relacionados con la conexión."""
+        connection_errors = [
+            'Connection is closed',
+            'Connection reset',
+            'Connection timeout',
+            'Connection lost',
+            'Communication link failure'
+        ]
+        return any(err in str(error) for err in connection_errors)
+            
+    def execute_query(self, query: str, params: tuple = None) -> int:
+        """Ejecuta una query con reintentos automáticos."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with self.get_cursor() as cursor:
+                    cursor.execute(query, params or ())
+                    return cursor.rowcount
+            except DatabaseError as e:
+                if attempt < max_retries - 1 and self._is_connection_error(e.__cause__):
+                    time.sleep(1)
+                    continue
                 raise
                 
     def close(self) -> None:
-        """Safely close connection."""
+        """Cierra la conexión de manera segura."""
         if self.connection and not self.connection.closed:
             try:
                 self.connection.close()
+            except Exception as e:
+                self.logger.error(f"Error cerrando conexión: {e}")
             finally:
                 self.connection = None
-                self.logger.info("Connection closed")
+                self.logger.info("Conexión cerrada")

@@ -1,5 +1,5 @@
 from database.connection import DatabaseConnection
 from database.repository import TemplateRepository
-from database.service import DatabaseService
+from database.service import TemplateService
 
-__all__ = ['DatabaseConnection', 'TemplateRepository', 'DatabaseService']
+__all__ = ['DatabaseConnection', 'TemplateRepository', 'TemplateService']

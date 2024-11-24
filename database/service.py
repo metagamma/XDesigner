@@ -1,267 +1,705 @@
-import re
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import logging
+from pathlib import Path
+from datetime import datetime
 
 from core.config import AppConfig
 from core.models import Template, Field
-from core.exceptions import ValidationError
-from database.connection import Cache, DatabaseConnection
-from database.repository import TemplateRepository
+from core.exceptions import DatabaseError, ValidationError
 from core.constants import RegionType
+from database.connection import DatabaseConnection
+from database.repository import TemplateRepository
 
-class DatabaseService:
-    """High-level database operations with business logic."""
+class TemplateService:
+    """
+    Servicio de alto nivel para operaciones de plantillas y campos.
+    Implementa la lógica de negocio y coordina el acceso a datos.
+    """
     
     def __init__(self, config: AppConfig):
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.connection = DatabaseConnection(config)
         self.repository = TemplateRepository(self.connection)
-        self.cache = Cache(config.cache_timeout) if config.cache_enabled else None
 
     def initialize(self) -> None:
-        """Initialize connections and resources."""
-        self.connection.initialize()
-        self.logger.info("Database service initialized")
+        """
+        Inicializa las conexiones y recursos del servicio.
+        
+        Raises:
+            DatabaseError: Si hay error en la inicialización
+        """
+        try:
+            self.connection.initialize()
+            self.logger.info("Servicio de plantillas inicializado")
+        except Exception as e:
+            self.logger.error(f"Error inicializando servicio: {e}")
+            raise DatabaseError("Error al inicializar servicio de plantillas") from e
 
     def close(self) -> None:
-        """Release resources and close connections."""
-        if self.cache:
-            self.cache.clear()
-        self.connection.close()
-        self.logger.info("Database service closed")
+        """Libera recursos y cierra conexiones."""
+        try:
+            self.connection.close()
+            self.logger.info("Servicio de plantillas cerrado")
+        except Exception as e:
+            self.logger.error(f"Error cerrando servicio: {e}")
 
-    def get_templates(self, use_cache: bool = True) -> List[Template]:
-        """Get all available templates."""
-        if use_cache and self.cache:
-            cached = self.cache.get('templates')
-            if cached:
-                return cached
-
-        templates = self.repository.get_templates()
+    def get_templates(self) -> List[Template]:
+        """
+        Obtiene todas las plantillas disponibles.
         
-        if use_cache and self.cache:
-            self.cache.set('templates', templates)
+        Returns:
+            List[Template]: Lista de plantillas
             
-        return templates
-
-    def get_template(self, template_id: int, use_cache: bool = True) -> Optional[Template]:
-        """Get specific template."""
-        cache_key = f'template_{template_id}'
-        
-        if use_cache and self.cache:
-            cached = self.cache.get(cache_key)
-            if cached:
-                return cached
-
-        template = self.repository.get_template_by_id(template_id)
-        
-        if use_cache and self.cache and template:
-            self.cache.set(cache_key, template)
+        Raises:
+            DatabaseError: Si hay error al obtener las plantillas
+        """
+        try:
+            templates = self.repository.get_templates()
             
-        return template
+            # Validar existencia de archivos de imagen
+            for template in templates:
+                if not Path(template.Imagen).exists():
+                    self.logger.warning(
+                        f"Archivo de imagen no encontrado para plantilla {template.ID}: {template.Imagen}"
+                    )
+                    
+            return templates
+            
+        except Exception as e:
+            self.logger.error(f"Error obteniendo plantillas: {e}")
+            raise DatabaseError("Error al obtener plantillas") from e
+
+    def get_template(self, template_id: int) -> Optional[Template]:
+        """
+        Obtiene una plantilla específica con validaciones.
+        
+        Args:
+            template_id: ID de la plantilla
+            
+        Returns:
+            Optional[Template]: Plantilla encontrada o None
+            
+        Raises:
+            ValidationError: Si el ID es inválido
+            DatabaseError: Si hay error en la consulta
+        """
+        try:
+            if template_id <= 0:
+                raise ValidationError("ID de plantilla debe ser mayor que cero")
+                
+            template = self.repository.get_template_by_id(template_id)
+            
+            if template and not Path(template.Imagen).exists():
+                self.logger.warning(
+                    f"Archivo de imagen no encontrado: {template.Imagen}"
+                )
+                
+            return template
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error obteniendo plantilla {template_id}: {e}")
+            raise DatabaseError(f"Error al obtener plantilla {template_id}") from e
 
     def create_template(self, template: Template) -> int:
-        """Create new template."""
-        with self.connection.transaction() as cursor:
-            template_id = self.repository.create_template(template)
-            if self.cache:
-                self.cache.clear()
-            return template_id
+        """
+        Crea una nueva plantilla con validaciones adicionales.
+        
+        Args:
+            template: Objeto Template con los datos
+            
+        Returns:
+            int: ID de la plantilla creada
+            
+        Raises:
+            ValidationError: Si los datos son inválidos
+            DatabaseError: Si hay error en la creación
+        """
+        try:
+            # Validar existencia de imagen
+            if not Path(template.Imagen).exists():
+                raise ValidationError(f"Archivo de imagen no encontrado: {template.Imagen}")
+            
+            # Validar nombre único
+            existing = self.repository.search_templates(template.Nombre)
+            if any(t.Nombre == template.Nombre for t in existing):
+                raise ValidationError(f"Ya existe una plantilla con el nombre: {template.Nombre}")
+            
+            return self.repository.create_template(template)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error creando plantilla: {e}")
+            raise DatabaseError("Error al crear plantilla") from e
 
     def update_template(self, template: Template) -> bool:
-        """Update existing template."""
-        with self.connection.transaction() as cursor:
-            success = self.repository.update_template(template)
-            if success and self.cache:
-                self.cache.clear()
-            return success
+        """
+        Actualiza una plantilla existente con validaciones.
+        
+        Args:
+            template: Objeto Template con los datos actualizados
+            
+        Returns:
+            bool: True si se actualizó correctamente
+            
+        Raises:
+            ValidationError: Si los datos son inválidos
+            DatabaseError: Si hay error en la actualización
+        """
+        try:
+            # Verificar que existe la plantilla
+            existing = self.repository.get_template_by_id(template.ID)
+            if not existing:
+                raise ValidationError(f"No existe plantilla con ID: {template.ID}")
+            
+            # Validar existencia de imagen
+            if not Path(template.Imagen).exists():
+                raise ValidationError(f"Archivo de imagen no encontrado: {template.Imagen}")
+            
+            # Validar nombre único (excepto para la misma plantilla)
+            templates = self.repository.search_templates(template.Nombre)
+            if any(t.Nombre == template.Nombre and t.ID != template.ID for t in templates):
+                raise ValidationError(f"Ya existe una plantilla con el nombre: {template.Nombre}")
+            
+            return self.repository.update_template(template)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error actualizando plantilla {template.ID}: {e}")
+            raise DatabaseError(f"Error al actualizar plantilla {template.ID}") from e
 
     def delete_template(self, template_id: int) -> bool:
-        """Delete template and its fields."""
-        with self.connection.transaction() as cursor:
-            success = self.repository.delete_template(template_id)
-            if success and self.cache:
-                self.cache.clear()
-            return success
-
-    def get_template_fields(self, template_id: int, use_cache: bool = True) -> List[Field]:
-        """Get all fields for a template."""
-        cache_key = f'fields_{template_id}'
+        """
+        Elimina una plantilla y sus campos asociados.
         
-        if use_cache and self.cache:
-            cached = self.cache.get(cache_key)
-            if cached:
-                return cached
-
-        fields = self.repository.get_template_fields(template_id)
-        
-        if use_cache and self.cache:
-            self.cache.set(cache_key, fields)
+        Args:
+            template_id: ID de la plantilla
             
-        return fields
+        Returns:
+            bool: True si se eliminó correctamente
+            
+        Raises:
+            ValidationError: Si el ID es inválido
+            DatabaseError: Si hay error en la eliminación
+        """
+        try:
+            # Verificar que existe la plantilla
+            template = self.repository.get_template_by_id(template_id)
+            if not template:
+                raise ValidationError(f"No existe plantilla con ID: {template_id}")
+            
+            # Obtener campos asociados para logging
+            fields = self.repository.get_template_fields(template_id)
+            
+            # Eliminar plantilla y campos
+            success = self.repository.delete_template(template_id)
+            
+            if success:
+                self.logger.info(
+                    f"Plantilla {template_id} eliminada junto con {len(fields)} campos"
+                )
+            
+            return success
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error eliminando plantilla {template_id}: {e}")
+            raise DatabaseError(f"Error al eliminar plantilla {template_id}") from e
+
+    def get_template_fields(self, template_id: int) -> List[Field]:
+        """
+        Obtiene todos los campos de una plantilla organizados por página.
+        
+        Args:
+            template_id: ID de la plantilla
+            
+        Returns:
+            List[Field]: Lista de campos ordenados por página
+            
+        Raises:
+            ValidationError: Si el ID es inválido
+            DatabaseError: Si hay error en la consulta
+        """
+        try:
+            # Verificar que existe la plantilla
+            if not self.repository.get_template_by_id(template_id):
+                raise ValidationError(f"No existe plantilla con ID: {template_id}")
+            
+            return self.repository.get_template_fields(template_id)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error obteniendo campos de plantilla {template_id}: {e}")
+            raise DatabaseError(f"Error al obtener campos") from e
 
     def create_field(self, field: Field) -> int:
-        """Create new field with overlap validation."""
-        existing_fields = self.get_template_fields(field.ID_Template, use_cache=False)
+        """
+        Crea un nuevo campo con validaciones de solapamiento.
         
-        for existing_field in existing_fields:
-            if (existing_field.NroPagina == field.NroPagina and 
-                field.intersects(existing_field)):
+        Args:
+            field: Objeto Field con los datos del campo
+            
+        Returns:
+            int: ID del campo creado
+            
+        Raises:
+            ValidationError: Si los datos son inválidos o hay solapamiento
+            DatabaseError: Si hay error en la creación
+        """
+        try:
+            # Verificar que existe la plantilla
+            if not self.repository.get_template_by_id(field.ID_Template):
+                raise ValidationError(f"No existe plantilla con ID: {field.ID_Template}")
+            
+            # Validar tipo de campo
+            if field.Tipo_Campo not in [t.value for t in RegionType]:
+                valid_types = ", ".join(t.value for t in RegionType)
+                raise ValidationError(f"Tipo de campo debe ser uno de: {valid_types}")
+            
+            # Validar dimensiones mínimas (20px convertido a pulgadas)
+            min_size_inches = 20 / field._dpi
+            if field.Cord_width < min_size_inches or field.Cord_height < min_size_inches:
                 raise ValidationError(
-                    "El campo se superpone con un campo existente",
-                    field=existing_field.Nombre_Campo
+                    f"El campo debe tener al menos 20 píxeles de ancho y alto "
+                    f"({min_size_inches:.4f} pulgadas a {field._dpi} DPI)"
                 )
-
-        with self.connection.transaction() as cursor:
-            field_id = self.repository.create_field(field)
-            if self.cache:
-                self.cache.clear()
-            return field_id
+            
+            # Verificar solapamiento con otros campos en la misma página
+            existing_fields = self.repository.get_fields_by_page(
+                field.ID_Template, 
+                field.NroPagina
+            )
+            
+            for existing in existing_fields:
+                if field.intersects(existing):
+                    raise ValidationError(
+                        f"El campo se solapa con el campo existente: {existing.Nombre_Campo}"
+                    )
+            
+            return self.repository.create_field(field)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error creando campo: {e}")
+            raise DatabaseError("Error al crear campo") from e
 
     def update_field(self, field: Field) -> bool:
-        """Update field with overlap validation."""
-        existing_fields = self.get_template_fields(field.ID_Template, use_cache=False)
+        """
+        Actualiza un campo existente con validaciones de solapamiento.
         
-        for existing_field in existing_fields:
-            if (existing_field.ID != field.ID and 
-                existing_field.NroPagina == field.NroPagina and 
-                field.intersects(existing_field)):
+        Args:
+            field: Objeto Field con los datos actualizados
+            
+        Returns:
+            bool: True si se actualizó correctamente
+            
+        Raises:
+            ValidationError: Si los datos son inválidos o hay solapamiento
+            DatabaseError: Si hay error en la actualización
+        """
+        try:
+            # Verificar que existe el campo
+            existing = self.repository.get_field_by_id(field.ID)
+            if not existing:
+                raise ValidationError(f"No existe campo con ID: {field.ID}")
+            
+            # Verificar que existe la plantilla
+            if not self.repository.get_template_by_id(field.ID_Template):
+                raise ValidationError(f"No existe plantilla con ID: {field.ID_Template}")
+            
+            # Validar tipo de campo
+            if field.Tipo_Campo not in [t.value for t in RegionType]:
+                valid_types = ", ".join(t.value for t in RegionType)
+                raise ValidationError(f"Tipo de campo debe ser uno de: {valid_types}")
+            
+            # Validar dimensiones mínimas
+            min_size_inches = 20 / field._dpi
+            if field.Cord_width < min_size_inches or field.Cord_height < min_size_inches:
                 raise ValidationError(
-                    "El campo se superpone con un campo existente",
-                    field=existing_field.Nombre_Campo
+                    f"El campo debe tener al menos 20 píxeles de ancho y alto "
+                    f"({min_size_inches:.4f} pulgadas a {field._dpi} DPI)"
                 )
-
-        with self.connection.transaction() as cursor:
-            success = self.repository.update_field(field)
-            if success and self.cache:
-                self.cache.clear()
-            return success
+            
+            # Verificar solapamiento con otros campos
+            other_fields = self.repository.get_fields_by_page(
+                field.ID_Template,
+                field.NroPagina
+            )
+            
+            for other in other_fields:
+                if other.ID != field.ID and field.intersects(other):
+                    raise ValidationError(
+                        f"El campo se solapa con el campo existente: {other.Nombre_Campo}"
+                    )
+            
+            return self.repository.update_field(field)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error actualizando campo {field.ID}: {e}")
+            raise DatabaseError(f"Error al actualizar campo {field.ID}") from e
 
     def delete_field(self, field_id: int) -> bool:
-        """Delete field."""
-        with self.connection.transaction() as cursor:
-            success = self.repository.delete_field(field_id)
-            if success and self.cache:
-                self.cache.clear()
-            return success
-
-    def get_field(self, field_id: int) -> Optional[Field]:
-        """Get specific field."""
-        return self.repository.get_field_by_id(field_id)
-
-    def duplicate_template(self, template_id: int, new_name: str) -> int:
-        """Duplicate template with validation."""
-        # Verify template exists
-        if not self.get_template(template_id):
-            raise ValidationError(f"Template {template_id} not found")
-            
-        # Verify new name
-        if not new_name.strip():
-            raise ValidationError("Template name cannot be empty")
-            
-        existing = self.repository.search_templates(new_name)
-        if any(t.Nombre == new_name for t in existing):
-            raise ValidationError(f"Template with name '{new_name}' already exists")
-
-        with self.connection.transaction() as cursor:
-            new_id = self.repository.duplicate_template(template_id, new_name)
-            if self.cache:
-                self.cache.clear()
-            return new_id
-        
-        
-    def move_field(self, field_id: int, new_x: float, new_y: float) -> bool:
-        """Move field to new coordinates."""
-        field = self.get_field(field_id)
-        if not field:
-            raise ValidationError(f"Field {field_id} not found")
-
-        field.Cord_x = new_x
-        field.Cord_y = new_y
-        
-        return self.update_field(field)
-
-    def resize_field(self, field_id: int, new_width: float, new_height: float) -> bool:
-        """Resize field dimensions."""
-        field = self.get_field(field_id)
-        if not field:
-            raise ValidationError(f"Field {field_id} not found")
-
-        if new_width <= 0 or new_height <= 0:
-            raise ValidationError("Dimensions must be greater than zero")
-
-        field.Cord_width = new_width
-        field.Cord_height = new_height
-        
-        return self.update_field(field)
-
-    def change_field_type(self, field_id: int, new_type: str) -> bool:
-        """Change field type."""
-        field = self.get_field(field_id)
-        if not field:
-            raise ValidationError(f"Field {field_id} not found")
-
-        # Validate new type
-        if new_type not in [t.value for t in RegionType]:
-            valid_types = ", ".join(t.value for t in RegionType)
-            raise ValidationError(f"Type must be one of: {valid_types}")
-
-        field.Tipo_Campo = new_type
-        
-        return self.update_field(field)
-
-    def rename_field(self, field_id: int, new_name: str) -> bool:
-        """Rename field."""
-        field = self.get_field(field_id)
-        if not field:
-            raise ValidationError(f"Field {field_id} not found")
-
-        # Format name to uppercase
-        new_name = new_name.strip().upper()
-        
-        # Validate new name
-        if not new_name:
-            raise ValidationError("Field name cannot be empty")
-        
-        if not re.match(self.config.field_validation['name_pattern'], new_name):
-            raise ValidationError("Name can only contain uppercase letters, numbers and underscores")
-        
-        if len(new_name) > self.config.field_validation['max_name_length']:
-            raise ValidationError(f"Name cannot exceed {self.config.field_validation['max_name_length']} characters")
-
-        field.Nombre_Campo = new_name
-        
-        return self.update_field(field)
-
-    def search_fields(self, template_id: int, search_text: str) -> List[Field]:
-        """Search fields by name within a template."""
-        query = f"%{search_text.strip().upper()}%"
-        
-        sql = """
-        SELECT ID, ID_Template, Nombre_Campo, Tipo_Campo,
-               Cord_x, Cord_y, Cord_width, Cord_height,
-               NroPagina, IdRectangulo
-        FROM Tbl_Fields
-        WHERE ID_Template = ? AND Nombre_Campo LIKE ?
-        ORDER BY NroPagina, Nombre_Campo
         """
+        Elimina un campo.
         
-        with self.connection.get_cursor() as cursor:
-            cursor.execute(sql, (template_id, query))
-            return [Field(*row) for row in cursor.fetchall()]
+        Args:
+            field_id: ID del campo
+            
+        Returns:
+            bool: True si se eliminó correctamente
+            
+        Raises:
+            ValidationError: Si el ID es inválido
+            DatabaseError: Si hay error en la eliminación
+        """
+        try:
+            # Verificar que existe el campo
+            field = self.repository.get_field_by_id(field_id)
+            if not field:
+                raise ValidationError(f"No existe campo con ID: {field_id}")
+            
+            return self.repository.delete_field(field_id)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error eliminando campo {field_id}: {e}")
+            raise DatabaseError(f"Error al eliminar campo {field_id}") from e
 
     def get_fields_by_page(self, template_id: int, page_number: int) -> List[Field]:
-        """Get all fields for a specific page of a template."""
-        sql = """
-        SELECT ID, ID_Template, Nombre_Campo, Tipo_Campo,
-               Cord_x, Cord_y, Cord_width, Cord_height,
-               NroPagina, IdRectangulo
-        FROM Tbl_Fields
-        WHERE ID_Template = ? AND NroPagina = ?
-        ORDER BY Nombre_Campo
         """
+        Obtiene los campos de una página específica.
         
-        with self.connection.get_cursor() as cursor:
-            cursor.execute(sql, (template_id, page_number))
-            return [Field(*row) for row in cursor.fetchall()]
+        Args:
+            template_id: ID de la plantilla
+            page_number: Número de página
+            
+        Returns:
+            List[Field]: Lista de campos en la página
+            
+        Raises:
+            ValidationError: Si los parámetros son inválidos
+            DatabaseError: Si hay error en la consulta
+        """
+        try:
+            # Verificar que existe la plantilla
+            template = self.repository.get_template_by_id(template_id)
+            if not template:
+                raise ValidationError(f"No existe plantilla con ID: {template_id}")
+            
+            # Validar número de página
+            if page_number < 0:
+                raise ValidationError("El número de página no puede ser negativo")
+            
+            return self.repository.get_fields_by_page(template_id, page_number)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(
+                f"Error obteniendo campos de página {page_number} "
+                f"de plantilla {template_id}: {e}"
+            )
+            raise DatabaseError("Error al obtener campos por página") from e
+
+    def move_field(self, field_id: int, new_x: float, new_y: float) -> bool:
+        """
+        Mueve un campo a nuevas coordenadas.
+        
+        Args:
+            field_id: ID del campo
+            new_x: Nueva coordenada X en pulgadas
+            new_y: Nueva coordenada Y en pulgadas
+            
+        Returns:
+            bool: True si se movió correctamente
+            
+        Raises:
+            ValidationError: Si las coordenadas son inválidas
+            DatabaseError: Si hay error en la actualización
+        """
+        try:
+            # Obtener campo actual
+            field = self.repository.get_field_by_id(field_id)
+            if not field:
+                raise ValidationError(f"No existe campo con ID: {field_id}")
+            
+            # Validar coordenadas
+            if new_x < 0 or new_y < 0:
+                raise ValidationError("Las coordenadas no pueden ser negativas")
+            
+            # Actualizar coordenadas
+            field.Cord_x = new_x
+            field.Cord_y = new_y
+            
+            # Verificar solapamiento en nueva posición
+            other_fields = self.repository.get_fields_by_page(
+                field.ID_Template,
+                field.NroPagina
+            )
+            
+            for other in other_fields:
+                if other.ID != field.ID and field.intersects(other):
+                    raise ValidationError(
+                        f"La nueva posición se solapa con el campo: {other.Nombre_Campo}"
+                    )
+            
+            return self.repository.update_field(field)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error moviendo campo {field_id}: {e}")
+            raise DatabaseError(f"Error al mover campo {field_id}") from e
+
+    def resize_field(self, field_id: int, new_width: float, new_height: float) -> bool:
+        """
+        Cambia el tamaño de un campo.
+        
+        Args:
+            field_id: ID del campo
+            new_width: Nuevo ancho en pulgadas
+            new_height: Nuevo alto en pulgadas
+            
+        Returns:
+            bool: True si se redimensionó correctamente
+            
+        Raises:
+            ValidationError: Si las dimensiones son inválidas
+            DatabaseError: Si hay error en la actualización
+        """
+        try:
+            # Obtener campo actual
+            field = self.repository.get_field_by_id(field_id)
+            if not field:
+                raise ValidationError(f"No existe campo con ID: {field_id}")
+            
+            # Validar dimensiones mínimas (20px convertido a pulgadas)
+            min_size_inches = 20 / field._dpi
+            if new_width < min_size_inches or new_height < min_size_inches:
+                raise ValidationError(
+                    f"El campo debe tener al menos 20 píxeles de ancho y alto "
+                    f"({min_size_inches:.4f} pulgadas a {field._dpi} DPI)"
+                )
+            
+            # Actualizar dimensiones
+            field.Cord_width = new_width
+            field.Cord_height = new_height
+            
+            # Verificar solapamiento con nuevo tamaño
+            other_fields = self.repository.get_fields_by_page(
+                field.ID_Template,
+                field.NroPagina
+            )
+            
+            for other in other_fields:
+                if other.ID != field.ID and field.intersects(other):
+                    raise ValidationError(
+                        f"Las nuevas dimensiones se solapan con el campo: {other.Nombre_Campo}"
+                    )
+            
+            return self.repository.update_field(field)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error redimensionando campo {field_id}: {e}")
+            raise DatabaseError(f"Error al redimensionar campo {field_id}") from e
+
+    def rename_field(self, field_id: int, new_name: str) -> bool:
+        """
+        Renombra un campo.
+        
+        Args:
+            field_id: ID del campo
+            new_name: Nuevo nombre
+            
+        Returns:
+            bool: True si se renombró correctamente
+            
+        Raises:
+            ValidationError: Si el nombre es inválido
+            DatabaseError: Si hay error en la actualización
+        """
+        try:
+            # Obtener campo actual
+            field = self.repository.get_field_by_id(field_id)
+            if not field:
+                raise ValidationError(f"No existe campo con ID: {field_id}")
+            
+            # Validar nuevo nombre
+            new_name = new_name.strip().upper()
+            if not new_name:
+                raise ValidationError("El nombre no puede estar vacío")
+                
+            if len(new_name) > 100:
+                raise ValidationError("El nombre no puede exceder 100 caracteres")
+            
+            # Verificar nombre único en la plantilla
+            existing_fields = self.repository.get_template_fields(field.ID_Template)
+            if any(f.Nombre_Campo == new_name and f.ID != field_id for f in existing_fields):
+                raise ValidationError(f"Ya existe un campo con el nombre: {new_name}")
+            
+            # Actualizar nombre
+            field.Nombre_Campo = new_name
+            return self.repository.update_field(field)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error renombrando campo {field_id}: {e}")
+            raise DatabaseError(f"Error al renombrar campo {field_id}") from e
+
+    def change_field_type(self, field_id: int, new_type: str) -> bool:
+        """
+        Cambia el tipo de un campo.
+        
+        Args:
+            field_id: ID del campo
+            new_type: Nuevo tipo (OMR, ICR, BARCODE, XMARK)
+            
+        Returns:
+            bool: True si se cambió correctamente
+            
+        Raises:
+            ValidationError: Si el tipo es inválido
+            DatabaseError: Si hay error en la actualización
+        """
+        try:
+            # Obtener campo actual
+            field = self.repository.get_field_by_id(field_id)
+            if not field:
+                raise ValidationError(f"No existe campo con ID: {field_id}")
+            
+            # Validar nuevo tipo
+            if new_type not in [t.value for t in RegionType]:
+                valid_types = ", ".join(t.value for t in RegionType)
+                raise ValidationError(f"Tipo de campo debe ser uno de: {valid_types}")
+            
+            # Actualizar tipo
+            field.Tipo_Campo = new_type
+            return self.repository.update_field(field)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error cambiando tipo de campo {field_id}: {e}")
+            raise DatabaseError(f"Error al cambiar tipo de campo {field_id}") from e
+
+    def duplicate_template(self, template_id: int, new_name: str) -> int:
+        """
+        Duplica una plantilla y todos sus campos.
+        
+        Args:
+            template_id: ID de la plantilla a duplicar
+            new_name: Nombre para la nueva plantilla
+            
+        Returns:
+            int: ID de la nueva plantilla
+            
+        Raises:
+            ValidationError: Si los parámetros son inválidos
+            DatabaseError: Si hay error en la duplicación
+        """
+        try:
+            # Verificar que existe la plantilla original
+            template = self.repository.get_template_by_id(template_id)
+            if not template:
+                raise ValidationError(f"No existe plantilla con ID: {template_id}")
+            
+            # Validar nuevo nombre
+            new_name = new_name.strip()
+            if not new_name:
+                raise ValidationError("El nombre no puede estar vacío")
+            
+            # Verificar que el archivo de imagen existe
+            if not Path(template.Imagen).exists():
+                raise ValidationError(f"Archivo de imagen no encontrado: {template.Imagen}")
+            
+            # Verificar nombre único
+            existing = self.repository.search_templates(new_name)
+            if any(t.Nombre == new_name for t in existing):
+                raise ValidationError(f"Ya existe una plantilla con el nombre: {new_name}")
+            
+            return self.repository.duplicate_template(template_id, new_name)
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error duplicando plantilla {template_id}: {e}")
+            raise DatabaseError(f"Error al duplicar plantilla {template_id}") from e
+
+    def validate_template(self, template_id: int) -> List[str]:
+        """
+        Valida la integridad de una plantilla y sus campos.
+        
+        Args:
+            template_id: ID de la plantilla a validar
+            
+        Returns:
+            List[str]: Lista de mensajes de error/advertencia
+            
+        Raises:
+            ValidationError: Si el ID es inválido
+            DatabaseError: Si hay error en la validación
+        """
+        try:
+            warnings = []
+            
+            # Verificar que existe la plantilla
+            template = self.repository.get_template_by_id(template_id)
+            if not template:
+                raise ValidationError(f"No existe plantilla con ID: {template_id}")
+            
+            # Validar archivo de imagen
+            if not Path(template.Imagen).exists():
+                warnings.append(f"Archivo de imagen no encontrado: {template.Imagen}")
+            
+            # Obtener campos
+            fields = self.repository.get_template_fields(template_id)
+            
+            # Validar nombres duplicados
+            field_names = {}
+            for field in fields:
+                if field.Nombre_Campo in field_names:
+                    warnings.append(
+                        f"Campo duplicado: {field.Nombre_Campo} en páginas "
+                        f"{field_names[field.Nombre_Campo]} y {field.NroPagina}"
+                    )
+                field_names[field.Nombre_Campo] = field.NroPagina
+            
+            # Validar solapamientos por página
+            for i, field1 in enumerate(fields):
+                for field2 in fields[i+1:]:
+                    if (field1.NroPagina == field2.NroPagina and 
+                        field1.intersects(field2)):
+                        warnings.append(
+                            f"Campos solapados en página {field1.NroPagina}: "
+                            f"{field1.Nombre_Campo} y {field2.Nombre_Campo}"
+                        )
+            
+            # Validar dimensiones mínimas
+            min_size_inches = 20 / (field._dpi if fields else 300)
+            for field in fields:
+                if field.Cord_width < min_size_inches or field.Cord_height < min_size_inches:
+                    warnings.append(
+                        f"Campo {field.Nombre_Campo} menor que 20 píxeles"
+                    )
+            
+            return warnings
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error validando plantilla {template_id}: {e}")
+            raise DatabaseError(f"Error al validar plantilla {template_id}") from e
+            
