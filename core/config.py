@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 
 @dataclass
 class AppConfig:
-    """Configuración global de la aplicación."""
-    APP_ROOT: Path = field(default_factory=lambda: Path(__file__).parent.parent.parent)
+    """Configuración global de la aplicación de emplantillado."""
+    APP_ROOT: Path = field(default_factory=lambda: Path(__file__).parent.parent)
     LOGS_PATH: Path = field(init=False)
     
     # Configuración de base de datos
@@ -25,21 +25,26 @@ class AppConfig:
     db_connection_lifetime = 0
     db_connection_reset = "Yes"
     
-    # Configuración de procesamiento
-    batch_size: int = 10
-    max_threads: int = os.cpu_count() or 4
+    # Configuración de imágenes y visualización
     dpi_min: int = 300
-    min_area: int = 700000
-    timeout_seconds: int = 30
-    max_retries: int = 3
+    max_image_size: int = 20_000_000  # 20MB
+    allowed_image_extensions: set = field(default_factory=lambda: {'.tif', '.tiff'})
+    
+    # Configuración de campos
+    min_field_size: int = 20  # píxeles
+    max_field_name_length: int = 100
+    field_name_pattern: str = r'^[A-Z0-9_]+$'
     
     # Configuración de logging
     log_level: int = logging.INFO
     log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     log_date_format: str = "%Y-%m-%d %H:%M:%S"
     
-    def __post_init__(self):
-        """Inicializa rutas y carga configuración."""
-        self.LOGS_PATH = self.APP_ROOT / "logs"
-
+    # Configuración de caché
+    cache_enabled: bool = True
+    cache_timeout: int = 300  # segundos
     
+    def __post_init__(self):
+        """Inicializa rutas y crea directorios necesarios."""
+        self.LOGS_PATH = self.APP_ROOT / "logs"
+        self.LOGS_PATH.mkdir(parents=True, exist_ok=True)

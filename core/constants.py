@@ -1,20 +1,26 @@
-from enum import Enum, auto
-from typing import Set
-
-class ProcessingStatus(Enum):
-    """Estados posibles del procesamiento de imágenes."""
-    PENDING = auto()
-    PROCESSING = auto()
-    COMPLETED = auto()
-    FAILED = auto()
-    PARTIAL = auto()
+from enum import Enum
 
 class RegionType(Enum):
+    """Tipos de campos soportados en el sistema."""
     OMR = "OMR"
     ICR = "ICR"
     BARCODE = "BARCODE"
     XMARK = "XMARK"
+    
+    @classmethod
+    def get_choices(cls):
+        """Retorna las opciones disponibles para la UI."""
+        return [(t.value, t.value) for t in cls]
 
+class TemplateStatus(Enum):
+    """Estados posibles de una plantilla."""
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    ARCHIVED = "ARCHIVED"
 
-ALLOWED_IMAGE_EXTENSIONS: Set[str] = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}
-MIN_IMAGE_DPI: int = 300
+class FieldValidation(Enum):
+    """Tipos de validación para campos."""
+    REQUIRED = "REQUIRED"
+    NUMERIC = "NUMERIC"
+    ALPHANUMERIC = "ALPHANUMERIC"
+    CUSTOM = "CUSTOM"
