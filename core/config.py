@@ -1,50 +1,69 @@
-import os
-import logging
-from pathlib import Path
 from dataclasses import dataclass, field
+import logging
+import os
+from pathlib import Path
+from typing import Dict, Any
 
 @dataclass
 class AppConfig:
-    """Configuración global de la aplicación de emplantillado."""
-    APP_ROOT: Path = field(default_factory=lambda: Path(__file__).parent.parent)
+    """Configuración global de la aplicación."""
+    APP_ROOT: Path = field(default_factory=lambda: Path(__file__).parent.parent.parent)
     LOGS_PATH: Path = field(init=False)
     
-    # Configuración de base de datos
-    db_driver: str = "ODBC Driver 17 for SQL Server"
-    db_server: str = "127.0.0.1"
-    db_name: str = "BD_PLANTILLA_PRD"
-    db_user: str = "sa"
-    db_password: str = "admin.2023"
-    db_trust_certificate: str = "yes"
-    db_multiple_active_resultsets: str = "yes"
-    db_pool_min_size: int = 5
-    db_pool_max_size: int = 20
-    db_connection_timeout: int = 30
-    db_query_timeout: int = 300
-    db_pool_timeout: int = 30
-    db_connection_lifetime = 0
-    db_connection_reset = "Yes"
+    # Base de datos
+    db_config: Dict[str, Any] = field(default_factory=lambda: {
+        "driver": "ODBC Driver 17 for SQL Server",
+        "server": "127.0.0.1",
+        "database": "ENLA2024",
+        "user": "sa",
+        "password": "admin.2023",
+        "trust_certificate": "yes",
+        "multiple_active_resultsets": "yes",
+        "pool_min_size": 5,
+        "pool_max_size": 20,
+        "connection_timeout": 30,
+        "query_timeout": 300,
+        "pool_timeout": 30,
+        "connection_lifetime": 0,
+        "connection_reset": "Yes"
+    })
     
-    # Configuración de imágenes y visualización
-    dpi_min: int = 300
-    max_image_size: int = 20_000_000  # 20MB
-    allowed_image_extensions: set = field(default_factory=lambda: {'.tif', '.tiff'})
+    # Sistema
+    system_config: Dict[str, Any] = field(default_factory=lambda: {
+        "batch_size": 10,
+        "max_threads": os.cpu_count() or 4,
+        "timeout_seconds": 30,
+        "max_retries": 3
+    })
     
-    # Configuración de campos
-    min_field_size: int = 20  # píxeles
-    max_field_name_length: int = 100
-    field_name_pattern: str = r'^[A-Z0-9_]+$'
+    # Logging
+    log_config: Dict[str, Any] = field(default_factory=lambda: {
+        "level": logging.INFO,
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        "date_format": "%Y-%m-%d %H:%M:%S",
+        "max_bytes": 5_242_880,  # 5MB
+        "backup_count": 5,
+        "json_format": False
+    })
     
-    # Configuración de logging
-    log_level: int = logging.INFO
-    log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    log_date_format: str = "%Y-%m-%d %H:%M:%S"
-    
-    # Configuración de caché
-    cache_enabled: bool = True
-    cache_timeout: int = 300  # segundos
+    # Imagen y procesamiento
+    image_config: Dict[str, Any] = field(default_factory=lambda: {
+        "min_dpi": 300,
+        "min_area": 700000,
+        "allowed_extensions": {'.tif', '.tiff'}
+    })
     
     def __post_init__(self):
         """Inicializa rutas y crea directorios necesarios."""
         self.LOGS_PATH = self.APP_ROOT / "logs"
         self.LOGS_PATH.mkdir(parents=True, exist_ok=True)
+    
+    def get_log_config(self) -> Dict[str, Any]:
+        """Obtiene configuración de logging para setup_logging."""
+        return {
+            "log_path": self.LOGS_PATH / "app.log",
+            "level": self.log_config["level"],
+            "max_bytes": self.log_config["max_bytes"],
+            "backup_count": self.log_config["backup_count"],
+            "json_format": self.log_config["json_format"]
+        }
